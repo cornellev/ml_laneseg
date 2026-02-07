@@ -1,0 +1,21 @@
+# ROS 2 / Colcon generated folders
+build/
+install/
+log/
+.colcon/
+
+# Pixi Environment (Machine specific)
+.pixi/
+.pixi/*
+!.pixi/config.toml
+
+# Python compiled files
+__pycache__/
+*.pyc
+
+# IDE settings (Optional, but recommended)
+.vscode/
+.idea/
+
+# System / Misc
+.DS_Store

@@ -1,0 +1,42 @@
+[workspace]
+name = "zed_ros2_ml"
+version = "0.1.0"
+description = "ZED 2 ROS 2 Wrapper with PyTorch integration"
+authors = ["User"]
+channels = ["conda-forge", "robostack-staging"]
+platforms = ["linux-64"]
+
+[tasks]
+build = "colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release"
+install-setup = "source install/setup.bash"
+start-camera = "ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2"
+
+[dependencies]
+python = "3.11.*"
+numpy = "*"
+# ROS 2 Humble Base
+ros-humble-desktop = "*"
+ros-humble-xacro = "*"
+ros-humble-diagnostic-updater = "*"
+ros-humble-nmea-msgs = "*"
+ros-humble-cv-bridge = "*"
+ros-humble-geographic-msgs = "*"
+ros-humble-robot-localization = "*"
+ros-humble-backward-ros = "*"
+
+# Build tools
+cmake = "*"
+pkg-config = "*"
+make = "*"
+ninja = "*"
+colcon-common-extensions = "*"
+
+# For PyTorch pip installation
+pip = "*"
+
+[pypi-dependencies]
+torch = { version = ">=2.0.0", index = "https://download.pytorch.org/whl/cu121" }
+torchvision = { version = ">=0.15.0", index = "https://download.pytorch.org/whl/cu121" }
+
+[activation]
+scripts = ["setup_env.sh"]

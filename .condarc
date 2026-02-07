@@ -1,0 +1,8 @@
+cat > .condarc << 'EOF'
+channel_priority: flexible
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - robostack-staging
+EOF

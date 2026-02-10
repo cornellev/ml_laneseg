@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'lane_segmentation_node = zed_ml_inference.lane_segmentation_node:main',
         ],
     },
 )

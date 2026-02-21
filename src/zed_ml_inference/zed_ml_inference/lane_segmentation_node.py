@@ -59,28 +59,71 @@ class LaneSegmentationNode(Node):
         self.publisher_ = self.create_publisher(Image, 'lane_mask', 10)
         self.bridge = CvBridge()
 
+    def letterbox_image(self, image, target_size=(1248, 384)):
+        target_w, target_h = target_size
+        h, w = image.shape[:2]
 
+        scale = min(target_w / w, target_h / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        resized_img = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        padded_img = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        top = (target_h - new_h) // 2
+        left = (target_w - new_w) // 2
+        padded_img[top:top+new_h, left:left+new_w] = resized_img
+
+        return padded_img, (scale, top, left, new_w, new_h)
+
+    def unletterbox_mask(self, mask, padding_info, original_size):
+        scale, top, left, new_w, new_h = padding_info
+        orig_w, orig_h = original_size
+        cropped_mask = mask[top:top+new_h, left:left+new_w]
+        restored_mask = cv2.resize(cropped_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+        
+        return restored_mask
+    
     def timer_callback(self):
 
         if self.zed.grab() == sl.ERROR_CODE.SUCCESS:
             
-            self.zed.retrieve_image(self.image_zed, sl.VIEW.LEFT)
-            image_data = self.image_zed.get_data() #numpy array 
+            self.zed.retrieve_image(self.image_zed_left, sl.VIEW.LEFT)
+
+            self.zed.retrieve_image(self.image_zed_right, sl.VIEW.RIGHT)
+
+            image_data_left = self.image_zed_left.get_data() #numpy array 
+            image_data_right = self.image_zed_right.get_data() #numpy array
+
             
-            image_rgb = cv2.cvtColor(image_data, cv2.COLOR_BGRA2RGB)
+            image_rgb_left = cv2.cvtColor(image_data_left, cv2.COLOR_BGRA2RGB)
+            image_rgb_right = cv2.cvtColor(image_data_right, cv2.COLOR_BGRA2RGB)
+
+            original_size = (image_rgb_left.shape[1], image_rgb_left.shape[0])
             target_training_size = (1248, 384) # fix later (should be same as training size)
-            image_resized = cv2.resize(image_rgb, target_training_size)
+            padded_left, pad_info_left = self.letterbox_image(image_rgb_left, target_training_size)
+            padded_right, pad_info_right = self.letterbox_image(image_rgb_right, target_training_size)
 
-            input_tensor = self.transform(image_resized).unsqueeze(0).to(self.device)
+            tensor_left = self.transform(padded_left)
+            tensor_right = self.transform(padded_right)
+            input_batch = torch.stack([tensor_left, tensor_right]).to(self.device)
+            
             with torch.no_grad():
-                output = self.model(input_tensor)
-            predicted_mask = torch.argmax(output, dim=1).squeeze().cpu().numpy()
+                output_batch = self.model(input_batch)
+            predicted_masks = torch.argmax(output_batch, dim=1).cpu().numpy()
+            mask_left = predicted_masks[0]
+            mask_right = predicted_masks[1]
 
-            visual_mask = (predicted_mask * 255).astype(np.uint8)
-            ros_image = self.bridge.cv2_to_imgmsg(visual_mask, encoding="mono8")
+            visual_mask_left = (mask_left * 255).astype(np.uint8)
+            visual_mask_right = (mask_right * 255).astype(np.uint8)
 
-            self.publisher_.publish(ros_image)
+            final_mask_left = self.unletterbox_mask(visual_mask_left, pad_info_left, original_size)
+            final_mask_right = self.unletterbox_mask(visual_mask_right, pad_info_right, original_size)
+
+            ros_image_left = self.bridge.cv2_to_imgmsg(final_mask_left, encoding="mono8")
+            ros_image_right = self.bridge.cv2_to_imgmsg(final_mask_right, encoding="mono8")
+
+            self.publisher_.publish(ros_image_left)
+            self.publisher_.publish(ros_image_right)
             self.get_logger().info('Image grabbed and processed and released succesfully')
+    
 
         
 def main(args=None):

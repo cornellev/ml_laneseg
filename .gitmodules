@@ -4,3 +4,6 @@
 [submodule "src/zed-ros2-interfaces"]
 	path = src/zed-ros2-interfaces
 	url = https://github.com/stereolabs/zed-ros2-interfaces.git
+[submodule "src/LFD_RoadSeg"]
+	path = src/LFD_RoadSeg
+	url = https://github.com/zhouhuan-hust/LFD_RoadSeg

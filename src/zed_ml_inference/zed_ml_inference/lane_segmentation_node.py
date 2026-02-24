@@ -8,10 +8,17 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2 
 import numpy as np 
+import os 
+
 
 #load the lane segmentation model
-sys.path.append('.../LFD_RoadSeg') # fix later 
-from models.LFD_RoadSeg import LFD_RoadSeg
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_path = os.path.abspath(os.path.join(current_dir, "../../.."))
+
+lfd_repo_path = os.path.join(src_path, "LFD_RoadSeg")
+if lfd_repo_path not in sys.path:
+    sys.path.append(lfd_repo_path)
+from models._LFDRoadSeg import LFD_RoadSeg
 
 
 class LaneSegmentationNode(Node):
@@ -31,32 +38,47 @@ class LaneSegmentationNode(Node):
         if (err != sl.ERROR_CODE.SUCCESS) :
             exit(-1)
 
-        self.image_zed = sl.Mat()
+        self.image_zed_left = sl.Mat()
+        self.image_zed_right = sl.Mat()
+
         timer_period = 1.0 / 25.0  # 25 fps
         self.timer = self.create_timer(timer_period, self.timer_callback)
         
         self.get_logger().info('ZED Node Started successfully')
 
+        cfg = {
+            'models': {'backbone': 'resnet18'},
+            'training': {'scale_factor': 2} 
+        }
+        
         self.get_logger().info('Loading custom LFD_RoadSeg Model...')
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self.model = LFD_RoadSeg(num_classes = 2)
-        weights_path = '.../LFD_RoadSeg/weights/best.pt' # fix later
-        checkpoint = torch.load(weights_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint)
-        self.model.to(self.device)
-        self.model.eval()
+        self.model = LFD_RoadSeg(cfg)
 
-        self.transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ]
-        )
+        weights_path = 'model_epoch_150.pth'
+
+        checkpoint = torch.load(weights_path, map_location=self.device)
+        
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.model.load_state_dict(checkpoint)
+            
+        self.model.to(self.device).eval()
+
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.3598, 0.3653, 0.3662], 
+                std=[0.2573, 0.2663, 0.2756]
+            )
+        ])
 
         self.get_logger().info('Model loaded successfully')
 
-        self.publisher_ = self.create_publisher(Image, 'lane_mask', 10)
+        self.pub_left = self.create_publisher(Image, 'lane_mask/left', 10)
+        self.pub_right = self.create_publisher(Image, 'lane_mask/right', 10)
         self.bridge = CvBridge()
 
     def letterbox_image(self, image, target_size=(1248, 384)):
@@ -120,8 +142,8 @@ class LaneSegmentationNode(Node):
             ros_image_left = self.bridge.cv2_to_imgmsg(final_mask_left, encoding="mono8")
             ros_image_right = self.bridge.cv2_to_imgmsg(final_mask_right, encoding="mono8")
 
-            self.publisher_.publish(ros_image_left)
-            self.publisher_.publish(ros_image_right)
+            self.pub_left.publish(ros_image_left)
+            self.pub_right.publish(ros_image_right)
             self.get_logger().info('Image grabbed and processed and released succesfully')
     
 

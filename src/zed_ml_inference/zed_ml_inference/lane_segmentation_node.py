@@ -13,12 +13,17 @@ import os
 
 #load the lane segmentation model
 current_dir = os.path.dirname(os.path.abspath(__file__))
-src_path = os.path.abspath(os.path.join(current_dir, "../../.."))
+LFD_REPO_PATH = "/ros2_ws/src/src/LFD_RoadSeg"
 
-lfd_repo_path = os.path.join(src_path, "LFD_RoadSeg")
-if lfd_repo_path not in sys.path:
-    sys.path.append(lfd_repo_path)
-from models._LFDRoadSeg import LFD_RoadSeg
+if os.path.exists(LFD_REPO_PATH):
+    sys.path.append(LFD_REPO_PATH)
+
+try:
+    from models._LFDRoadSeg import LFD_RoadSeg
+    print("Success: LFD_RoadSeg imported.")
+except ImportError as e:
+    print(f"Import Error: {e}")
+    sys.exit(1)
 
 
 class LaneSegmentationNode(Node):
@@ -46,15 +51,15 @@ class LaneSegmentationNode(Node):
         
         self.get_logger().info('ZED Node Started successfully')
 
-        cfg = {
-            'models': {'backbone': 'resnet18'},
-            'training': {'scale_factor': 2} 
+        self.cfg = {
+            'scale_factor': 2 
         }
+    
         
         self.get_logger().info('Loading custom LFD_RoadSeg Model...')
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self.model = LFD_RoadSeg(cfg)
+        self.model = LFD_RoadSeg(**self.cfg)
 
         weights_path = 'model_epoch_150.pth'
 
@@ -128,7 +133,9 @@ class LaneSegmentationNode(Node):
             input_batch = torch.stack([tensor_left, tensor_right]).to(self.device)
             
             with torch.no_grad():
-                output_batch = self.model(input_batch)
+                output_batch = self.model({"img": input_batch})
+                if isinstance(output_batch, (list, tuple)):
+                    output_batch = output_batch[0]
             predicted_masks = torch.argmax(output_batch, dim=1).cpu().numpy()
             mask_left = predicted_masks[0]
             mask_right = predicted_masks[1]

@@ -1,7 +1,7 @@
 # Dockerfile for non-jetson (WSL, ubuntu, etc.)
 # USAGE: docker build -t zed_ros_bot:desktop -f Dockerfile.desktop .
 
-FROM stereolabs/zed:5.2-gl-devel-cuda12.8-ubuntu22.04
+FROM stereolabs/zed:5.2-gl-devel-l4t-r36.4
 
 ENV DEBIAN_FRONTEND=noninteractive
 

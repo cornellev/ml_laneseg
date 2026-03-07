@@ -38,8 +38,10 @@ WORKDIR /ros2_ws
 COPY ./src /ros2_ws/src
 
 # get rosdep to fix dependencies automatically
-RUN (rosdep init || true) && rosdep update && \
-    rosdep install --from-paths src --ignore-src -r -y
+RUN apt-get update && \
+    (rosdep init || true) && rosdep update && \
+    rosdep install --from-paths src --ignore-src -r -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # source ROS, build
 RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \

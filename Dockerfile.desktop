@@ -28,11 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rosdep init && rosdep update \
     && rm -rf /var/lib/apt/lists/*
 
-# Python dependencies
 RUN pip3 install --no-cache-dir \
-    # Pytorch for Cuda 12.1
-    torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
-    opencv-python-headless scipy tqdm numpy
+    opencv-python-headless scipy tqdm numpy && \
+    pip3 install --no-cache-dir \
+    torch torchvision \
+    --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu122
 
 WORKDIR /ros2_ws
 COPY ./src /ros2_ws/src

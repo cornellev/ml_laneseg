@@ -1,38 +1,40 @@
 # Dockerfile for non-jetson (WSL, ubuntu, etc.)
 # USAGE: docker build -t zed_ros_bot:desktop -f Dockerfile.desktop .
 
-FROM stereolabs/zed:5.2-py-devel-l4t-r36.4
+FROM stereolabs/zed:5.2-gl-devel-cuda12.8-ubuntu22.04
 
-# ── Environment ──────────────────────────────────────────────────────────────
-ENV DEBIAN_FRONTEND=noninteractive \
-    ROS_DISTRO=humble \
-    ROS_ROOT=/opt/ros/humble \
-    PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive
 
-# ── ROS2 Humble ──────────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl gnupg2 lsb-release \
-    && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-        -o /usr/share/keyrings/ros-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
-        http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
-        > /etc/apt/sources.list.d/ros2.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        ros-humble-ros-base \
-        ros-humble-cv-bridge \
-        ros-humble-sensor-msgs \
-        ros-humble-nmea-msgs \
-        python3-colcon-common-extensions \
-        python3-rosdep \
-        python3-pip \
-    && rosdep init && rosdep update \
+# Install ROS 2 Humble, colcon, rosdep (through ros-dev-tools)
+RUN apt-get update && apt-get install -y software-properties-common curl gnupg2 && \
+    add-apt-repository universe && \
+    curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null && \
+    apt-get update && apt-get install -y \
+    ros-humble-desktop \
+    ros-humble-nmea-msgs \
+    ros-humble-geographic-msgs \
+    ros-humble-diagnostic-updater \
+    ros-humble-robot-localization \
+    ros-humble-backward-ros \
+    ros-humble-image-transport \
+    ros-humble-image-transport-plugins \
+    ros-humble-camera-info-manager \
+    ros-humble-xacro \
+    ros-dev-tools \
+    python3-pip \
+    usbutils \
+    git \
+    nano \
+    cmake \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Python dependencies
 RUN pip3 install --no-cache-dir \
-    opencv-python-headless scipy tqdm numpy && \
-    pip3 install --no-cache-dir \
-    torch torchvision \
-    --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu122
+    # Pytorch for Cuda 12.1
+    torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
+    opencv-python scipy tqdm numpy
 
 WORKDIR /ros2_ws
 COPY ./src /ros2_ws/src

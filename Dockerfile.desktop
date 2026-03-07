@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip3 install --no-cache-dir \
     # Pytorch for Cuda 12.1
     torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
-    opencv-python scipy tqdm numpy
+    opencv-python-headless scipy tqdm numpy
 
 WORKDIR /ros2_ws
 COPY ./src /ros2_ws/src

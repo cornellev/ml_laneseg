@@ -32,7 +32,7 @@ RUN pip3 install --no-cache-dir \
     opencv-python-headless scipy tqdm numpy && \
     pip3 install --no-cache-dir \
     torch torchvision \
-    --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu122
+    --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu122
 
 WORKDIR /ros2_ws
 COPY ./src /ros2_ws/src

@@ -13,7 +13,7 @@ import os
 
 #load the lane segmentation model
 current_dir = os.path.dirname(os.path.abspath(__file__))
-LFD_REPO_PATH = "/ros2_ws/src/src/LFD_RoadSeg"
+LFD_REPO_PATH = "/ros2_ws/src/LFD_RoadSeg"
 
 if os.path.exists(LFD_REPO_PATH):
     sys.path.append(LFD_REPO_PATH)

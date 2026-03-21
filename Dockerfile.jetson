@@ -1,5 +1,8 @@
-# Dockerfile for non-jetson (WSL, ubuntu, etc.)
-# USAGE: docker build -t zed_ros_bot:desktop -f Dockerfile.desktop .
+# Jetson Dockerfile
+# USAGE: docker build --network=host --dns=8.8.8.8 -t lane_segr -f Dockerfile.jetson .
+# To run the image with the default command at the bottom, do `docker run -it --rm --runtime nvidia --privileged --network host lane_segr`
+# To run a separate command, i.e. running the test model, do `docker run -it --rm --runtime nvidia --privileged --network host lane_segr <command>`
+# e.g. `<command>` can be `ros2 run zed_ml_inference test_model`
 
 FROM stereolabs/zed:5.2-py-devel-l4t-r36.4
 
@@ -57,4 +60,4 @@ COPY ./ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x /ros_entrypoint.sh
 ENTRYPOINT ["/ros_entrypoint.sh"]
 
-CMD ["bash"]
+CMD ["ros2", "run", "zed_ml_inference", "lane_segmentation_node"]

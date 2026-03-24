@@ -24,6 +24,7 @@ setup(
             'lane_segmentation_node = zed_ml_inference.lane_segmentation_node:main',
             'test_model = zed_ml_inference.test_model:main',
             'test_camera = zed_ml_inference.test_camera:main',
+		'lane_segmentation_node_new = zed_ml_inference.lane_segmentation_node_new:main',
         ],
     },
 )

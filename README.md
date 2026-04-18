@@ -28,4 +28,8 @@ export FASTRTPS_DEFAULT_PROFILES_FILE=/ros2_ws/shm_disable.xml
 colcon build --packages-select zed_ml_inference --symlink-install 
 source install/setup.bash
 
-ros2 run zed_ml_inference lane_segmentation_node3dfast
+ros2 run zed_ml_inference lane_segmentation_node3dcenter
+
+# OR
+
+ros2 run zed_ml_inference lane_segmentation_node3dfastcenter

@@ -28,6 +28,7 @@ setup(
 		'lane_segmentation_node3d = zed_ml_inference.lane_segmentation_node3d:main',
 		'lane_segmentation_node3dfast = zed_ml_inference.lane_segmentation_node3dFAST:main',
         'lane_segmentation_node3dfastcenter = zed_ml_inference.lane_segmentation_node_center_3dFAST:main',
+        'lane_segmentation_node3dcenter = zed_ml_inference.lane_segmentation_node_center:main',
         ],
     },
 )

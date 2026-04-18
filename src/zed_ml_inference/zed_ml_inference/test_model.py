@@ -11,8 +11,6 @@ import os
 
 # Set up absolute pathing 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-# LFD_REPO_PATH = "/ros2_ws/src/src/LFD_RoadSeg" working on Mac
 LFD_REPO_PATH = "/ros2_ws/src/LFD_RoadSeg"
 
 if os.path.exists(LFD_REPO_PATH):
@@ -32,14 +30,7 @@ class MockLaneSegmentationNode(Node):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.get_logger().info(f'Running on device: {self.device}')
 
-        # 1. FIXED CONFIGURATION UNPACKING
-        # Flattened the config so it can be safely unpacked into the constructor
-        self.cfg = {
-            'scale_factor': 2
-        }
-        
-        # The '**' unpacks the dictionary into kwargs (e.g., scale_factor=2)
-        # This stops the model from absorbing the dictionary as a single variable
+        self.cfg = {'scale_factor': 2}
         self.model = LFD_RoadSeg(**self.cfg)
 
         weights_path = os.path.join(current_dir, 'model_epoch_150.pth')
@@ -47,11 +38,12 @@ class MockLaneSegmentationNode(Node):
             self.get_logger().error(f'Weights not found at {weights_path}')
             sys.exit(1)
 
-        # 2. SILENCED THE SECURITY WARNING
         checkpoint = torch.load(weights_path, map_location=self.device, weights_only=True)
         state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
         self.model.load_state_dict(state_dict)
-        self.model.to(self.device).eval()
+        
+        # EXACT LIVE NODE MECHANISM: FP16 and Eval mode
+        self.model.to(self.device).half().eval()
 
         self.transform = transforms.Compose([
             transforms.ToTensor(),
@@ -59,27 +51,7 @@ class MockLaneSegmentationNode(Node):
         ])
 
         self.test_image_path = os.path.join(current_dir, "test_input.png")
-        self.bridge = CvBridge()
-
         self.run_inference()
-
-    def letterbox_image(self, image, target_size=(1248, 384)):
-        target_w, target_h = target_size
-        h, w = image.shape[:2]
-        scale = min(target_w / w, target_h / h)
-        new_w, new_h = int(w * scale), int(h * scale)
-        resized_img = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        padded_img = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-        top = (target_h - new_h) // 2
-        left = (target_w - new_w) // 2
-        padded_img[top:top+new_h, left:left+new_w] = resized_img
-        return padded_img, (scale, top, left, new_w, new_h)
-
-    def unletterbox_mask(self, mask, padding_info, original_size):
-        scale, top, left, new_w, new_h = padding_info
-        orig_w, orig_h = original_size
-        cropped_mask = mask[top:top+new_h, left:left+new_w]
-        return cv2.resize(cropped_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
     
     def run_inference(self):
         image_data = cv2.imread(self.test_image_path)
@@ -88,14 +60,15 @@ class MockLaneSegmentationNode(Node):
             return
 
         image_rgb = cv2.cvtColor(image_data, cv2.COLOR_BGR2RGB)
-        original_size = (image_rgb.shape[1], image_rgb.shape[0])
-        padded, pad_info = self.letterbox_image(image_rgb, (1248, 384))
+        original_h, original_w = image_rgb.shape[:2]
         
-        tensor = self.transform(padded).unsqueeze(0).to(self.device)
+        # EXACT LIVE NODE MECHANISM: Fast resize to 624x192
+        input_resized = cv2.resize(image_rgb, (624, 192))
+        
+        # EXACT LIVE NODE MECHANISM: Convert to FP16 (.half()) to match model
+        tensor = self.transform(input_resized).unsqueeze(0).to(self.device).half()
 
         with torch.no_grad():
-            # 3. REQUIRED WRAPPER
-            # The forward method explicitly expects a dictionary to pull "img" from
             model_input = {"img": tensor}
             output = self.model(model_input)
             
@@ -104,15 +77,17 @@ class MockLaneSegmentationNode(Node):
             
             mask = torch.argmax(output, dim=1).squeeze().cpu().numpy()
 
+        # Convert mask to 0 and 255
         visual_mask = (mask * 255).astype(np.uint8)
-        final_mask = self.unletterbox_mask(visual_mask, pad_info, original_size)
+        
+        # Because we didn't letterbox, we can just stretch the mask back to the original image size
+        final_mask = cv2.resize(visual_mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
         
         # Create a blank colored mask (e.g., pure Green for the lane)
         color_mask = np.zeros_like(image_data)
-        color_mask[:, :, 2] = final_mask  # Assign the white mask to the Green channel
+        color_mask[:, :, 1] = final_mask  # Assign the white mask to the Green channel (BGR format)
         
         # Blend the original image and the green mask
-        # 0.7 is the weight of the original image, 0.4 is the weight of the color
         overlay_image = cv2.addWeighted(image_data, 0.7, color_mask, 0.4, 0)
         
         output_path = os.path.join(current_dir, "output_debug.jpg")

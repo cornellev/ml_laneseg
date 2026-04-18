@@ -10,7 +10,8 @@ FROM stereolabs/zed:5.2-py-devel-l4t-r36.4
 ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=humble \
     ROS_ROOT=/opt/ros/humble \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    FASTRTPS_DEFAULT_PROFILES_FILE=/ros2_ws/shm_disable.xml
 
 # ── ROS2 Humble ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,6 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && (rosdep init || true) && rosdep update \
     && rm -rf /var/lib/apt/lists/*
 
+RUN wget https://developer.download.nvidia.com/compute/cudss/0.6.0/local_installers/cudss-local-tegra-repo-ubuntu2204-0.6.0_0.6.0-1_arm64.deb && \
+    dpkg -i cudss-local-tegra-repo-ubuntu2204-0.6.0_0.6.0-1_arm64.deb && \
+    cp /var/cudss-local-tegra-repo-ubuntu2204-0.6.0/cudss-*-keyring.gpg /usr/share/keyrings/ && \
+    apt-get update && apt-get install -y cudss && \
+    rm cudss-local-tegra-repo-ubuntu2204-0.6.0_0.6.0-1_arm64.deb
 
 RUN  pip3 install --no-cache-dir \
     torch==2.10.0 \
@@ -38,7 +44,7 @@ RUN  pip3 install --no-cache-dir \
     --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
 
 RUN pip3 install --no-cache-dir \
-    opencv-python-headless scipy tqdm "numpy<2.0.0" thop
+    opencv-python-headless scipy tqdm "numpy<2.0.0" thop pycuda onnxscript
 
 WORKDIR /ros2_ws
 COPY ./src /ros2_ws/src

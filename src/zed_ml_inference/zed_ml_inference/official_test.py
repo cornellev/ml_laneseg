@@ -34,4 +34,8 @@ def main():
     zed.close()
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     main()
+=======
+    main()
+>>>>>>> 4821e581fbef432a57d2c5c44fa28e7f0bd0a34c

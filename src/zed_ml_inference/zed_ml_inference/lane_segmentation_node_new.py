@@ -64,7 +64,7 @@ class LaneSegmentationNode(Node):
         else:
             self.model.load_state_dict(checkpoint)
             
-        self.model.to(self.device).eval()
+        self.model.to(self.device).half().eval()
 
         self.transform = transforms.Compose([
             transforms.ToTensor(),
@@ -107,7 +107,7 @@ class LaneSegmentationNode(Node):
 
             # AI Inference
             padded, pad_info = self.letterbox_image(image_rgb)
-            tensor_in = self.transform(padded).unsqueeze(0).to(self.device)
+            tensor_in = self.transform(padded).unsqueeze(0).to(self.device).half()
             
             with torch.no_grad():
                 output = self.model({"img": tensor_in})

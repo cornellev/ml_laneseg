@@ -1,13 +1,16 @@
-# Use the Stereolabs image which ALREADY has CUDA-optimized PyTorch 
-# and the ZED SDK pre-installed for L4T R36 (JetPack 6)
-FROM stereolabs/zed:4.1-py-devel-l4t-r36.2
+# Jetson Dockerfile
+# USAGE: docker build --network=host --dns=8.8.8.8 -t lane_segr -f Dockerfile.jetson .
+# To run the image with the default command at the bottom, do `docker run -it --rm --runtime nvidia --privileged --network host lane_segr`
+# To run a separate command, i.e. running the test model, do `docker run -it --rm --runtime nvidia --privileged --network host lane_segr <command>`
+# e.g. `<command>` can be `ros2 run zed_ml_inference test_model`
+
+FROM stereolabs/zed:5.2-py-devel-l4t-r36.4
 
 # ── Environment ──────────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=humble \
-    PYTHONDONTWRITEBYTECODE=1 \
-    # Force the library path so ROS and CUDA play nice
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    ROS_ROOT=/opt/ros/humble \
+    PYTHONDONTWRITEBYTECODE=1
 
 # ── ROS2 Humble ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -21,34 +24,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-ros-base \
         ros-humble-cv-bridge \
         ros-humble-sensor-msgs \
+        ros-humble-nmea-msgs \
         python3-colcon-common-extensions \
         python3-rosdep \
         python3-pip \
+    && (rosdep init || true) && rosdep update \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Python Dependencies ──────────────────────────────────────────────────────
-# Note: We do NOT install torch/torchvision here because they are 
-# ALREADY in the base image. If we pip install them, we overwrite the GPU version.
+
+RUN  pip3 install --no-cache-dir \
+    torch==2.10.0 \
+    torchvision==0.25.0 \
+    --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+
 RUN pip3 install --no-cache-dir \
-    "numpy<2.0.0" \
-    opencv-python-headless \
-    scipy \
-    tqdm \
-    thop
+    opencv-python-headless scipy tqdm "numpy<2.0.0" thop
 
 WORKDIR /ros2_ws
 COPY ./src /ros2_ws/src
 
-# Initialize rosdep and install package-specific deps
+# get rosdep to fix dependencies automatically
 RUN apt-get update && \
-    rosdep init || true && rosdep update && \
+    (rosdep init || true) && rosdep update && \
     rosdep install --from-paths src --ignore-src -r -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Build the workspace
+# source ROS, build
 RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \
-    colcon build --symlink-install --packages-select zed_ml_inference"
+    colcon build \
+	--symlink-install \
+	--packages-skip zed_debug zed_ros2 \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                     -DCMAKE_SHARED_LINKER_FLAGS='-Wl,--allow-shlib-undefined' \
+                     -DCMAKE_EXE_LINKER_FLAGS='-Wl,--allow-shlib-undefined'"
 
+# points to shell script that sources workspace
 COPY ./ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x /ros_entrypoint.sh
 ENTRYPOINT ["/ros_entrypoint.sh"]
+
+CMD ["ros2", "run", "zed_ml_inference", "lane_segmentation_node"]

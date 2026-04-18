@@ -28,7 +28,7 @@ class LaneSegSubscriber(Node):
     def mask_callback(self, msg):
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
-            cv2.imwrite('/ros2_ws/lane_mask_success.jpg', cv_image)
+            cv2.imwrite('/ros2_ws/lane_mask_suc1cess.jpg', cv_image)
             self.get_logger().info('Saved updated B&W Mask!', throttle_duration_sec=2.0)
         except Exception as e:
             self.get_logger().error(f'Failed to process mask: {e}')
@@ -36,7 +36,7 @@ class LaneSegSubscriber(Node):
     def overlay_callback(self, msg):
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            cv2.imwrite('/ros2_ws/lane_overlay_success.jpg', cv_image)
+            cv2.imwrite('/ros2_ws/lane_overlay_su1ccess.jpg', cv_image)
             self.get_logger().info('Saved updated Colored Overlay!', throttle_duration_sec=2.0)
         except Exception as e:
             self.get_logger().error(f'Failed to process overlay: {e}')

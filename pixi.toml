@@ -1,42 +1,56 @@
-[workspace]
-name = "zed_ros2_ml"
+[workspace] 
+name = "zed_ros2_ml_jetson"
 version = "0.1.0"
-description = "ZED 2 ROS 2 Wrapper with PyTorch integration"
-authors = ["User"]
+description = "ZED 2 ROS 2 Wrapper + Lane Segmentation (Jetson Optimized)"
 channels = ["conda-forge", "robostack-staging"]
-platforms = ["linux-64"]
+platforms = ["linux-aarch64"] # CRITICAL: Tells Pixi this is an ARM Jetson
+
+[activation.env]
+ROS_DISTRO = "humble"
+PYTHONDONTWRITEBYTECODE = "1"
+FASTRTPS_DEFAULT_PROFILES_FILE = "shm_disable.xml"
 
 [tasks]
-build = "colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release"
-install-setup = "source install/setup.bash"
-start-camera = "ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2"
+# 1. Compiles the ZED SDK into the Pixi environment
+install-zed-python = "python3 /usr/local/zed/get_python_api.py"
+
+# 2. Builds the workspace
+build = "colcon build --symlink-install --packages-skip zed_debug --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_SHARED_LINKER_FLAGS='-Wl,--allow-shlib-undefined' -DCMAKE_EXE_LINKER_FLAGS='-Wl,--allow-shlib-undefined'"
+
+# 3. Runs your new Lane Node (Make sure to update the python file name if it changed)
+run-node = "source install/setup.bash && ros2 run zed_ml_inference lane_segmentation_node3dcenter"
+
+# 4. Kept from the old file: Starts the raw ZED camera
+start-camera = "source install/setup.bash && ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2"
 
 [dependencies]
-python = "3.11.*"
-numpy = "*"
-# ROS 2 Humble Base
+# Python & ROS 2 Humble (via RoboStack)
+python = "3.10.*" # JetPack 6 default
 ros-humble-desktop = "*"
+ros-humble-cv-bridge = "*"
+ros-humble-sensor-msgs = "*"
+ros-humble-foxglove-bridge = "*"
+ros-humble-visualization-msgs = "*"
+# Merged from old file for ZED Wrapper support
 ros-humble-xacro = "*"
 ros-humble-diagnostic-updater = "*"
-ros-humble-nmea-msgs = "*"
-ros-humble-cv-bridge = "*"
 ros-humble-geographic-msgs = "*"
 ros-humble-robot-localization = "*"
 ros-humble-backward-ros = "*"
-
-# Build tools
-cmake = "*"
-pkg-config = "*"
-make = "*"
-ninja = "*"
 colcon-common-extensions = "*"
+cmake = "*"
 
-# For PyTorch pip installation
-pip = "*"
+[pypi-options]
+# Point Pixi to the NVIDIA Jetson PyPI server for optimized Tegra wheels
+extra-index-urls = ["https://pypi.jetson-ai-lab.io/jp6/cu126"]
 
 [pypi-dependencies]
-torch = { version = ">=2.0.0", index = "https://download.pytorch.org/whl/cu121" }
-torchvision = { version = ">=0.15.0", index = "https://download.pytorch.org/whl/cu121" }
-
-[activation]
-scripts = ["setup_env.sh"]
+# Python ML Stack
+torch = "==2.10.0"
+torchvision = "==0.25.0"
+opencv-python-headless = "*"
+scipy = "*"
+tqdm = "*"
+numpy = "<2.0.0"
+thop = "*"
+requests = "*"

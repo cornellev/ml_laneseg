@@ -50,7 +50,7 @@ class MockLaneSegmentationNode(Node):
             transforms.Normalize(mean=[0.3598, 0.3653, 0.3662], std=[0.2573, 0.2663, 0.2756])
         ])
 
-        self.test_image_path = os.path.join(current_dir, "test_input.png")
+        self.test_image_path = os.path.join(current_dir, "test_image_intersection.png")
         self.run_inference()
     
     def run_inference(self):

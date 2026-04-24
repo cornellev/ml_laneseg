@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import os
 import json
+import struct
 import scipy.ndimage as ndimage
 from scipy.signal import find_peaks
 
@@ -30,9 +31,142 @@ except ImportError as e:
     sys.exit(1)
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  LANE DETECTION HELPERS  (same algorithm as mock node)
-# ═══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
+#  POINT CLOUD BUILDER
+#  Schema published on lane/points/lanes:
+#    x, y, z      — 3D position in ZED camera frame (metres)
+#    crossable    — 1.0 = may cross (dashed), 0.0 = must not cross (solid)
+#    point_type   — 0.0 = lane boundary edge, 1.0 = lane centre line
+#    lane_id      — integer lane index (0, 1, 2 …)
+# ════════════════════════════════════════════════════════════════
+
+FIELDS = [
+    PointField(name='x',          offset=0,  datatype=PointField.FLOAT32, count=1),
+    PointField(name='y',          offset=4,  datatype=PointField.FLOAT32, count=1),
+    PointField(name='z',          offset=8,  datatype=PointField.FLOAT32, count=1),
+    PointField(name='crossable',  offset=12, datatype=PointField.FLOAT32, count=1),
+    PointField(name='point_type', offset=16, datatype=PointField.FLOAT32, count=1),
+    PointField(name='lane_id',    offset=20, datatype=PointField.FLOAT32, count=1),
+]
+POINT_STEP = 24   # 6 × float32
+
+
+def build_pointcloud2(points, frame_id, stamp):
+    """
+    points : list of (x,y,z,crossable,point_type,lane_id) tuples or Nx6 ndarray
+    Returns a PointCloud2 message.
+    """
+    header           = Header()
+    header.stamp     = stamp
+    header.frame_id  = frame_id
+
+    if isinstance(points, np.ndarray):
+        pts = points.astype(np.float32)
+    else:
+        pts = np.array(points, dtype=np.float32)
+
+    if pts.ndim != 2 or pts.shape[1] != 6:
+        pts = pts.reshape(-1, 6)
+
+    data = pts.tobytes()
+    msg               = PointCloud2()
+    msg.header        = header
+    msg.height        = 1
+    msg.width         = len(pts)
+    msg.fields        = FIELDS
+    msg.is_bigendian  = False
+    msg.point_step    = POINT_STEP
+    msg.row_step      = POINT_STEP * len(pts)
+    msg.data          = data
+    msg.is_dense      = True
+    return msg
+
+
+def sample_valid_3d(pc_data, ys, xs, subsample=1):
+    """
+    Given pixel coordinates, return valid Nx3 XYZ points from ZED point cloud.
+    """
+    if subsample > 1:
+        idx = np.arange(0, len(ys), subsample)
+        ys, xs = ys[idx], xs[idx]
+    ys = np.clip(ys, 0, pc_data.shape[0] - 1)
+    xs = np.clip(xs, 0, pc_data.shape[1] - 1)
+    pts = pc_data[ys, xs, :3].astype(np.float32)
+    valid = (
+        np.isfinite(pts).all(axis=1) &
+        (pts[:, 2] > 0.10) &
+        (pts[:, 2] < 30.0)
+    )
+    return pts[valid]
+
+
+def lane_mask_to_points(pc_data, cam_mask, crossable, lane_id, subsample_boundary=2, subsample_center=4):
+    """
+    Given a camera-space lane mask:
+      - Extracts boundary ring pixels  → point_type = 0
+      - Extracts skeleton / centreline → point_type = 1
+    Returns Nx6 float32 array.
+    """
+    rows = []
+
+    # ── BOUNDARY ────────────────────────────────────────────────
+    thickness = 5
+    erode_k   = np.ones((thickness * 2 + 1, thickness * 2 + 1), np.uint8)
+    eroded    = cv2.erode(cam_mask, erode_k, iterations=1)
+    boundary  = cv2.bitwise_xor(cam_mask, eroded)
+
+    b_ys, b_xs = np.where(boundary > 0)
+    if len(b_ys) > 0:
+        pts3d = sample_valid_3d(pc_data, b_ys, b_xs, subsample=subsample_boundary)
+        if len(pts3d) > 0:
+            extras = np.column_stack([
+                np.full(len(pts3d), 1.0 if crossable else 0.0, dtype=np.float32),  # crossable
+                np.zeros(len(pts3d), dtype=np.float32),                              # point_type=0 boundary
+                np.full(len(pts3d), float(lane_id), dtype=np.float32),              # lane_id
+            ])
+            rows.append(np.hstack([pts3d, extras]))
+
+    # ── CENTRE LINE ─────────────────────────────────────────────
+    # For each row in the mask, find the median x column → centreline pixel
+    ys_all, xs_all = np.where(cam_mask > 0)
+    if len(ys_all) > 0:
+        centre_ys, centre_xs = [], []
+        for row in np.unique(ys_all)[::subsample_center]:
+            cols = xs_all[ys_all == row]
+            if len(cols) > 0:
+                centre_ys.append(row)
+                centre_xs.append(int(np.median(cols)))
+        c_ys = np.array(centre_ys, dtype=np.int32)
+        c_xs = np.array(centre_xs, dtype=np.int32)
+        if len(c_ys) > 0:
+            pts3d = sample_valid_3d(pc_data, c_ys, c_xs, subsample=1)
+            if len(pts3d) > 0:
+                extras = np.column_stack([
+                    np.full(len(pts3d), 1.0 if crossable else 0.0, dtype=np.float32),
+                    np.ones(len(pts3d), dtype=np.float32),                            # point_type=1 centre
+                    np.full(len(pts3d), float(lane_id), dtype=np.float32),
+                ])
+                rows.append(np.hstack([pts3d, extras]))
+
+    if not rows:
+        return np.zeros((0, 6), dtype=np.float32)
+    return np.vstack(rows).astype(np.float32)
+
+
+def intersection_mask_to_points(pc_data, dir_mask, direction, lane_id, subsample=3):
+    """For intersection branches — boundary + centre, crossable always True."""
+    return lane_mask_to_points(
+        pc_data, dir_mask,
+        crossable=True,
+        lane_id=lane_id,
+        subsample_boundary=subsample,
+        subsample_center=subsample * 2,
+    )
+
+
+# ════════════════════════════════════════════════════════════════
+#  LANE DETECTION  (straight road)
+# ════════════════════════════════════════════════════════════════
 
 def fill_road_convex(road_mask):
     contours, _ = cv2.findContours(
@@ -44,89 +178,6 @@ def fill_road_convex(road_mask):
     filled = np.zeros_like(road_mask)
     cv2.drawContours(filled, [hull], -1, 255, cv2.FILLED)
     return filled
-
-
-def check_intersection(road_mask, orig_h, orig_w):
-    hz_top, hz_bottom = int(orig_h * 0.35), int(orig_h * 0.55)
-    hz_band   = road_mask[hz_top:hz_bottom, :]
-    strip_w   = orig_w // 5
-    hz_left   = hz_band[:, :strip_w].mean() / 255.0
-    hz_right  = hz_band[:, orig_w - strip_w:].mean() / 255.0
-    hz_center = hz_band[:, strip_w:orig_w - strip_w].mean() / 255.0
-
-    lower_band  = road_mask[int(orig_h * 0.45):, :]
-    side_w      = orig_w // 6
-    lower_left  = lower_band[:, :side_w].mean() / 255.0
-    lower_right = lower_band[:, orig_w - side_w:].mean() / 255.0
-
-    mid_w       = (road_mask[int(orig_h * 0.50), :] > 0).sum()
-    bot_w       = (road_mask[int(orig_h * 0.85), :] > 0).sum()
-    width_ratio = bot_w / max(mid_w, 1)
-
-    has_left  = (hz_left  > 0.05) or (width_ratio > 1.8 and lower_left  > 0.08)
-    has_right = (hz_right > 0.05) or (width_ratio > 1.8 and lower_right > 0.08)
-    has_ahead = hz_center > 0.05
-
-    branches = []
-    if has_ahead: branches.append('ahead')
-    if has_left:  branches.append('left')
-    if has_right: branches.append('right')
-    return (has_left or has_right), branches
-
-
-def recover_intersection_road(road_mask, orig_h, orig_w):
-    close_k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
-    closed   = cv2.morphologyEx(road_mask, cv2.MORPH_CLOSE, close_k)
-    dk       = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (orig_w // 10, orig_w // 10))
-    dilated  = cv2.dilate(closed, dk, iterations=1)
-    dilated[:int(orig_h * 0.38), :] = 0
-    full     = fill_road_convex(dilated)
-    dk2      = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (orig_w // 6, orig_w // 6))
-    generous = cv2.dilate(road_mask, dk2, iterations=1)
-    generous[:int(orig_h * 0.38), :] = 0
-    return cv2.bitwise_and(full, generous)
-
-
-def find_intersection_center(road_mask, orig_h, orig_w):
-    mid_top, mid_bottom = int(orig_h * 0.35), int(orig_h * 0.65)
-    ys, xs = np.where(road_mask[mid_top:mid_bottom, :] > 0)
-    if len(xs) == 0:
-        return orig_w // 2, int(orig_h * 0.50)
-    return int(np.median(xs)), int(np.median(ys)) + mid_top
-
-
-def segment_intersection(road_mask, branches, orig_h, orig_w):
-    """Returns dict: direction -> binary mask (uint8, 255=road)"""
-    import math
-    full_road = recover_intersection_road(road_mask, orig_h, orig_w)
-    cx, cy    = find_intersection_center(road_mask, orig_h, orig_w)
-
-    yy, xx    = np.mgrid[0:orig_h, 0:orig_w]
-    angle_map = np.arctan2((yy - cy).astype(np.float32),
-                           (xx - cx).astype(np.float32))
-
-    def deg(x): return x * math.pi / 180.0
-    sector_defs = {
-        'ego':   [(deg(55),  deg(125))],
-        'ahead': [(deg(-125), deg(-55))],
-        'right': [(deg(-55),  deg(55))],
-        'left':  [(deg(125),  deg(180)), (deg(-180), deg(-125))],
-    }
-
-    result = {}
-    for direction, intervals in sector_defs.items():
-        if direction != 'ego' and direction not in branches:
-            continue
-        sector = np.zeros((orig_h, orig_w), dtype=np.uint8)
-        for (a_min, a_max) in intervals:
-            if a_min <= a_max:
-                sector |= ((angle_map >= a_min) & (angle_map <= a_max)).astype(np.uint8)
-            else:
-                sector |= ((angle_map >= a_min) | (angle_map <= a_max)).astype(np.uint8)
-        region = cv2.bitwise_and(sector * 255, full_road)
-        if (region > 0).sum() >= 300:
-            result[direction] = region
-    return result, (cx, cy)
 
 
 def detect_bev_intersection_rows(bright_clean, road_bev, orig_h, orig_w):
@@ -239,8 +290,10 @@ def find_valid_seed(mask, cx, cy, radius=80):
 
 def segment_straight_road(img_bgr, road_mask, orig_h, orig_w):
     """
-    Returns: colored_camera (H,W,3 BGR overlay), lane_masks dict,
-             lane_count, marking_infos list
+    Returns:
+      colored_cam   (H,W,3) BGR overlay image
+      lane_results  list of {'cam_mask', 'crossable', 'lane_id', 'marking_info'}
+      marking_infos list of dicts
     """
     src_pts = np.float32([
         [orig_w * 0.43, orig_h * 0.62],
@@ -255,8 +308,7 @@ def segment_straight_road(img_bgr, road_mask, orig_h, orig_w):
     M    = cv2.getPerspectiveTransform(src_pts, dst_pts)
     Minv = cv2.getPerspectiveTransform(dst_pts, src_pts)
 
-    road_bev_raw = cv2.warpPerspective(road_mask, M, (orig_w, orig_h),
-                                       flags=cv2.INTER_NEAREST)
+    road_bev_raw = cv2.warpPerspective(road_mask, M, (orig_w, orig_h), flags=cv2.INTER_NEAREST)
     img_bev      = cv2.warpPerspective(img_bgr,   M, (orig_w, orig_h))
     road_bev     = fill_road_convex(road_bev_raw)
 
@@ -264,7 +316,7 @@ def segment_straight_road(img_bgr, road_mask, orig_h, orig_w):
     road_gray_bev = cv2.bitwise_and(gray_bev, gray_bev, mask=road_bev)
     valid_px      = road_gray_bev[road_bev > 0]
     if len(valid_px) == 0:
-        return np.zeros_like(img_bgr), {}, 0, []
+        return np.zeros_like(img_bgr), [], []
 
     thresh = np.percentile(valid_px, 88)
     _, bright_bev = cv2.threshold(road_gray_bev, thresh, 255, cv2.THRESH_BINARY)
@@ -285,7 +337,7 @@ def segment_straight_road(img_bgr, road_mask, orig_h, orig_w):
     if len(road_cols) < 4:
         road_cols = np.where(road_bev.sum(axis=0) > orig_h * 0.1)[0]
     if len(road_cols) < 4:
-        return np.zeros_like(img_bgr), {}, 0, []
+        return np.zeros_like(img_bgr), [], []
 
     road_left   = int(road_cols[0])
     road_right  = int(road_cols[-1])
@@ -349,14 +401,14 @@ def segment_straight_road(img_bgr, road_mask, orig_h, orig_w):
 
     lane_colors_bgr = [
         (255,  80, 180), ( 60, 210,  60), (  0, 160, 255),
-        ( 60, 180, 255), (  0, 200, 180), (255, 160,   0),
+        (  0, 200, 180), (255, 160,   0), (200,  60, 200),
     ]
+
     seed_y      = int(orig_h * 0.88)
     colored_bev = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-    # Store per-lane BEV masks for 3D projection
-    lane_bev_masks = {}
     remaining   = road_carved.copy()
-    lane_count  = 0
+    lane_results = []
+    lane_count   = 0
 
     for idx, sx in enumerate(seed_xs):
         sx, sy = find_valid_seed(remaining, sx, seed_y)
@@ -368,123 +420,172 @@ def segment_straight_road(img_bgr, road_mask, orig_h, orig_w):
         lane_px = fill_img == 128
         if lane_px.sum() < 500:
             continue
-        color = lane_colors_bgr[idx % len(lane_colors_bgr)]
-        colored_bev[lane_px] = color
-        lane_bev_masks[f'lane_{lane_count}'] = lane_px.astype(np.uint8) * 255
-        remaining[lane_px] = 0
+
+        bev_mask_uint8 = lane_px.astype(np.uint8) * 255
+        colored_bev[lane_px] = lane_colors_bgr[idx % len(lane_colors_bgr)]
+        remaining[lane_px]   = 0
+
+        # Unwarp to camera space for 3D lookup
+        cam_mask = cv2.warpPerspective(bev_mask_uint8, Minv, (orig_w, orig_h),
+                                       flags=cv2.INTER_NEAREST)
+
+        # Crossable = the marking to the RIGHT of this lane
+        crossable = True
+        if idx < len(marking_infos):
+            crossable = marking_infos[idx]['crossable']
+
+        lane_results.append({
+            'cam_mask':    cam_mask,
+            'crossable':   crossable,
+            'lane_id':     lane_count,
+            'marking_info': marking_infos[idx] if idx < len(marking_infos) else {},
+        })
         lane_count += 1
 
-    # Unwarp colored BEV back to camera view
     colored_cam = cv2.warpPerspective(colored_bev, Minv, (orig_w, orig_h),
                                       flags=cv2.INTER_NEAREST)
-
-    # Unwarp lane masks back to camera view for 3D lookup
-    lane_cam_masks = {}
-    for name, bev_mask in lane_bev_masks.items():
-        cam_mask = cv2.warpPerspective(bev_mask, Minv, (orig_w, orig_h),
-                                       flags=cv2.INTER_NEAREST)
-        lane_cam_masks[name] = cam_mask
-
-    return colored_cam, lane_cam_masks, lane_count, marking_infos
+    return colored_cam, lane_results, marking_infos
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  3D POINT EXTRACTION
-# ═══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
+#  INTERSECTION DETECTION + SEGMENTATION
+# ════════════════════════════════════════════════════════════════
 
-def extract_3d_points_for_mask(pc_data, mask_uint8, subsample=4):
-    """
-    Given a camera-space binary mask and the ZED point cloud array,
-    returns Nx3 float32 array of valid (X, Y, Z) points in camera frame.
-    subsample: take every Nth pixel to keep point count manageable.
-    """
-    ys, xs = np.where(mask_uint8[::subsample, ::subsample] > 0)
-    ys = ys * subsample
-    xs = xs * subsample
-
-    # Clamp to valid range
-    ys = np.clip(ys, 0, pc_data.shape[0] - 1)
-    xs = np.clip(xs, 0, pc_data.shape[1] - 1)
-
-    pts = pc_data[ys, xs, :3].astype(np.float32)   # (N, 3)  X Y Z
-
-    # Filter NaN / Inf / unreasonably far points (> 30m)
-    valid = (
-        np.isfinite(pts[:, 0]) &
-        np.isfinite(pts[:, 1]) &
-        np.isfinite(pts[:, 2]) &
-        (pts[:, 2] > 0.1) &
-        (pts[:, 2] < 30.0)
-    )
-    return pts[valid]
+def check_intersection(road_mask, orig_h, orig_w):
+    hz_top, hz_bottom = int(orig_h * 0.35), int(orig_h * 0.55)
+    hz_band   = road_mask[hz_top:hz_bottom, :]
+    strip_w   = orig_w // 5
+    hz_left   = hz_band[:, :strip_w].mean() / 255.0
+    hz_right  = hz_band[:, orig_w - strip_w:].mean() / 255.0
+    hz_center = hz_band[:, strip_w:orig_w - strip_w].mean() / 255.0
+    lower_band  = road_mask[int(orig_h * 0.45):, :]
+    side_w      = orig_w // 6
+    lower_left  = lower_band[:, :side_w].mean() / 255.0
+    lower_right = lower_band[:, orig_w - side_w:].mean() / 255.0
+    mid_w       = (road_mask[int(orig_h * 0.50), :] > 0).sum()
+    bot_w       = (road_mask[int(orig_h * 0.85), :] > 0).sum()
+    width_ratio = bot_w / max(mid_w, 1)
+    has_left    = (hz_left  > 0.05) or (width_ratio > 1.8 and lower_left  > 0.08)
+    has_right   = (hz_right > 0.05) or (width_ratio > 1.8 and lower_right > 0.08)
+    has_ahead   = hz_center > 0.05
+    branches    = []
+    if has_ahead: branches.append('ahead')
+    if has_left:  branches.append('left')
+    if has_right: branches.append('right')
+    return (has_left or has_right), branches
 
 
-def make_pointcloud2_msg(points_xyz, frame_id, stamp, channel_name='lane'):
-    """
-    Packs an Nx3 float32 array into a PointCloud2 message.
-    Fields: x, y, z  (metres, ZED camera frame)
-    """
-    header = Header()
-    header.stamp  = stamp
-    header.frame_id = frame_id
-
-    fields = [
-        PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
-        PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
-        PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
-    ]
-    return pc2.create_cloud(header, fields, points_xyz.tolist())
+def recover_intersection_road(road_mask, orig_h, orig_w):
+    close_k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    closed   = cv2.morphologyEx(road_mask, cv2.MORPH_CLOSE, close_k)
+    dk       = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (orig_w // 10, orig_w // 10))
+    dilated  = cv2.dilate(closed, dk, iterations=1)
+    dilated[:int(orig_h * 0.38), :] = 0
+    full     = fill_road_convex(dilated)
+    dk2      = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (orig_w // 6, orig_w // 6))
+    generous = cv2.dilate(road_mask, dk2, iterations=1)
+    generous[:int(orig_h * 0.38), :] = 0
+    return cv2.bitwise_and(full, generous)
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  OVERLAY RENDERING
-# ═══════════════════════════════════════════════════════════════════
+def segment_intersection(road_mask, branches, orig_h, orig_w):
+    import math
+    full_road = recover_intersection_road(road_mask, orig_h, orig_w)
+    mid_top, mid_bottom = int(orig_h * 0.35), int(orig_h * 0.65)
+    ys, xs = np.where(road_mask[mid_top:mid_bottom, :] > 0)
+    cx = int(np.median(xs)) if len(xs) > 0 else orig_w // 2
+    cy = int(np.median(ys)) + mid_top if len(ys) > 0 else int(orig_h * 0.50)
+
+    yy, xx    = np.mgrid[0:orig_h, 0:orig_w]
+    angle_map = np.arctan2((yy - cy).astype(np.float32), (xx - cx).astype(np.float32))
+
+    def deg(x): return x * math.pi / 180.0
+    sector_defs = {
+        'ego':   [(deg(55),  deg(125))],
+        'ahead': [(deg(-125), deg(-55))],
+        'right': [(deg(-55),  deg(55))],
+        'left':  [(deg(125),  deg(180)), (deg(-180), deg(-125))],
+    }
+
+    direction_masks = {}
+    dir_colors_bgr  = {
+        'ego':   (  0, 140, 255),
+        'ahead': ( 60, 210,  60),
+        'left':  (200,  60, 200),
+        'right': (220, 160,  40),
+    }
+    colored = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+
+    for direction, intervals in sector_defs.items():
+        if direction != 'ego' and direction not in branches:
+            continue
+        sector = np.zeros((orig_h, orig_w), dtype=np.uint8)
+        for (a_min, a_max) in intervals:
+            if a_min <= a_max:
+                sector |= ((angle_map >= a_min) & (angle_map <= a_max)).astype(np.uint8)
+            else:
+                sector |= ((angle_map >= a_min) | (angle_map <= a_max)).astype(np.uint8)
+        region = cv2.bitwise_and(sector * 255, full_road)
+        if (region > 0).sum() >= 300:
+            direction_masks[direction] = region
+            colored[region > 0] = dir_colors_bgr[direction]
+
+    return colored, direction_masks, (cx, cy)
+
+
+# ════════════════════════════════════════════════════════════════
+#  OVERLAY RENDERER
+# ════════════════════════════════════════════════════════════════
 
 def render_overlay(img_bgr, colored_cam, mode, lane_count,
                    marking_infos, found_dirs, int_center=None):
     """
-    Returns two images:
-      raw_bgr   — untouched camera frame
-      overlay   — transparent colour overlay only (same size, black bg)
+    Returns overlay image (color regions + HUD on black background).
+    Raw image is published separately untouched.
     """
     orig_h, orig_w = img_bgr.shape[:2]
-
-    # Overlay image: colour regions + HUD on black background
     overlay = np.zeros_like(img_bgr)
-    overlay[colored_cam.any(axis=2)] = colored_cam[colored_cam.any(axis=2)]
+
+    # Paint lane/branch colours
+    mask = colored_cam.any(axis=2)
+    overlay[mask] = colored_cam[mask]
 
     # Intersection arrows
     if mode == 'intersection' and int_center is not None:
         cx, cy    = int_center
         arrow_len = max(orig_h // 9, 40)
         thickness = max(3, orig_h // 100)
-        arr_col   = {'left': (200, 60, 200), 'right': (220, 160, 40), 'ahead': (60, 210, 60)}
+        arrow_cols = {
+            'left':  (200,  60, 200),
+            'right': (220, 160,  40),
+            'ahead': ( 60, 210,  60),
+        }
         for d in found_dirs:
             if d == 'left':
                 cv2.arrowedLine(overlay, (cx, cy), (cx - arrow_len, cy),
-                                arr_col['left'], thickness, tipLength=0.35)
+                                arrow_cols['left'], thickness, tipLength=0.35)
             elif d == 'right':
                 cv2.arrowedLine(overlay, (cx, cy), (cx + arrow_len, cy),
-                                arr_col['right'], thickness, tipLength=0.35)
+                                arrow_cols['right'], thickness, tipLength=0.35)
             elif d == 'ahead':
                 cv2.arrowedLine(overlay, (cx, cy), (cx, cy - arrow_len),
-                                arr_col['ahead'], thickness, tipLength=0.35)
+                                arrow_cols['ahead'], thickness, tipLength=0.35)
         cv2.circle(overlay, (cx, cy), 6, (255, 255, 255), -1)
 
-    # HUD bar at bottom
+    # HUD bar
     bar_h = 38
     cv2.rectangle(overlay, (0, orig_h - bar_h), (orig_w, orig_h), (0, 0, 0), -1)
-
     hud_left = "intersection" if mode == 'intersection' else \
                f"{lane_count} lane{'s' if lane_count != 1 else ''}"
     cv2.putText(overlay, hud_left, (12, orig_h - bar_h + 24),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 1, cv2.LINE_AA)
 
-    dir_bgr = {'ahead': (60,160,60), 'left': (180,40,160),
-               'right': (40,130,200), 'ego': (0,110,220)}
+    # Chips
+    dir_bgr  = {'ahead': (60,160,60), 'left': (180,40,160),
+                'right': (40,130,200), 'ego': (0,110,220)}
     x_cursor = 200
-    chips = list(found_dirs.keys()) if mode == 'intersection' else \
-            [(f"{i['color']} {i['type']}", i['crossable']) for i in marking_infos]
+    chips    = list(found_dirs) if mode == 'intersection' else \
+               [(f"{m['color']} {m['type']}", m['crossable']) for m in marking_infos]
 
     for item in chips:
         if mode == 'intersection':
@@ -492,47 +593,46 @@ def render_overlay(img_bgr, colored_cam, mode, lane_count,
             chip_bgr = dir_bgr.get(label, (80, 80, 80))
         else:
             label, crossable = item
-            chip_bgr = (0, 0, 180) if not crossable else \
-                       (0, 140, 220) if 'yellow' in label else (0, 160, 60)
+            chip_bgr = (0, 0, 180)   if not crossable       else \
+                       (0, 140, 220) if 'yellow' in label   else \
+                       (0, 160,  60)
         chip_text   = f" {label} "
         (tw, th), _ = cv2.getTextSize(chip_text, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-        cv2.rectangle(overlay, (x_cursor, orig_h - bar_h + 5),
+        cv2.rectangle(overlay,
+                      (x_cursor, orig_h - bar_h + 5),
                       (x_cursor + tw + 4, orig_h - 5), chip_bgr, -1)
         cv2.putText(overlay, chip_text,
                     (x_cursor + 2, orig_h - bar_h + 5 + th + 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
         x_cursor += tw + 10
 
-    return img_bgr.copy(), overlay
+    return overlay
 
 
-# ═══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 #  ROS2 NODE
-# ═══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 
 class LaneSegmentationNode3D(Node):
     def __init__(self, name='lane_segmentation_node'):
         super().__init__(name)
-
-        self.start_time   = time.time()
+        self.start_time    = time.time()
         self.frame_counter = 0
 
-        # ── ZED 2 INIT ───────────────────────────────────────────
+        # ── ZED 2 ────────────────────────────────────────────────
         self.zed = sl.Camera()
         init_params = sl.InitParameters()
-        init_params.camera_resolution  = sl.RESOLUTION.VGA
-        init_params.camera_fps         = 30
-        init_params.depth_mode         = sl.DEPTH_MODE.NEURAL
-        init_params.coordinate_units   = sl.UNIT.METER
+        init_params.camera_resolution = sl.RESOLUTION.VGA
+        init_params.camera_fps        = 30
+        init_params.depth_mode        = sl.DEPTH_MODE.NEURAL
+        init_params.coordinate_units  = sl.UNIT.METER
 
-        err = self.zed.open(init_params)
-        if err != sl.ERROR_CODE.SUCCESS:
-            self.get_logger().error(f"Failed to open ZED camera: {err}")
+        if self.zed.open(init_params) != sl.ERROR_CODE.SUCCESS:
+            self.get_logger().error("Failed to open ZED camera")
             exit(-1)
 
         tracking_params = sl.PositionalTrackingParameters()
-        err = self.zed.enable_positional_tracking(tracking_params)
-        if err == sl.ERROR_CODE.SUCCESS:
+        if self.zed.enable_positional_tracking(tracking_params) == sl.ERROR_CODE.SUCCESS:
             self.get_logger().info("ZED 2 positional tracking enabled.")
 
         self.image_zed_left = sl.Mat()
@@ -542,11 +642,9 @@ class LaneSegmentationNode3D(Node):
         # ── AI MODEL ─────────────────────────────────────────────
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model  = LFD_RoadSeg(scale_factor=2)
-
         weights_path = os.path.join(current_dir, 'model_epoch_150.pth')
         checkpoint   = torch.load(weights_path, map_location=self.device)
-        state_dict   = checkpoint.get('model_state_dict', checkpoint)
-        self.model.load_state_dict(state_dict)
+        self.model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
         self.model.to(self.device).half().eval()
 
         self.transform = transforms.Compose([
@@ -555,46 +653,31 @@ class LaneSegmentationNode3D(Node):
                                  std =[0.2573, 0.2663, 0.2756]),
         ])
 
-        # ── ROS PUBLISHERS ───────────────────────────────────────
+        # ── PUBLISHERS  (exactly 3 topics) ───────────────────────
         self.bridge = CvBridge()
 
-        # Raw camera feed (untouched)
-        self.pub_raw     = self.create_publisher(Image, 'lane/camera_raw',    10)
-        # Overlay only (colour masks + HUD on black background)
-        self.pub_overlay = self.create_publisher(Image, 'lane/overlay',       10)
-
-        # Per-lane 3D point clouds  (straight road mode)
-        # Topic pattern: lane/points/lane_0, lane/points/lane_1, ...
-        self._pc_pubs = {}
-
-        # Single merged point cloud of ALL road pixels (useful for costmap)
-        self.pub_road_pc = self.create_publisher(PointCloud2, 'lane/points/road_all', 10)
-
-        # Intersection branch point clouds
-        self.pub_int_ego   = self.create_publisher(PointCloud2, 'lane/points/int_ego',   10)
-        self.pub_int_left  = self.create_publisher(PointCloud2, 'lane/points/int_left',  10)
-        self.pub_int_right = self.create_publisher(PointCloud2, 'lane/points/int_right', 10)
-        self.pub_int_ahead = self.create_publisher(PointCloud2, 'lane/points/int_ahead', 10)
-        self._int_pc_pubs  = {
-            'ego':   self.pub_int_ego,
-            'left':  self.pub_int_left,
-            'right': self.pub_int_right,
-            'ahead': self.pub_int_ahead,
-        }
-
-        # JSON metadata (lane count, marking type, crossable flags)
-        self.pub_meta = self.create_publisher(String, 'lane/metadata', 10)
+        # 1. Raw untouched camera feed
+        self.pub_raw = self.create_publisher(
+            Image, 'lane/camera_raw', 10
+        )
+        # 2. Colour overlay (black bg, lane regions + HUD)
+        self.pub_overlay = self.create_publisher(
+            Image, 'lane/overlay', 10
+        )
+        # 3. All lane boundaries + centrelines in one PointCloud2
+        #    Fields: x, y, z, crossable, point_type, lane_id
+        self.pub_lanes_pc = self.create_publisher(
+            PointCloud2, 'lane/points/lanes', 10
+        )
 
         self.timer = self.create_timer(1.0 / 30.0, self.timer_callback)
-        self.get_logger().info("LaneSegmentationNode3D ready.")
-
-    # ─────────────────────────────────────────────────────────────
-    def _get_or_create_lane_pc_pub(self, lane_name):
-        if lane_name not in self._pc_pubs:
-            topic = f'lane/points/{lane_name}'
-            self._pc_pubs[lane_name] = self.create_publisher(PointCloud2, topic, 10)
-            self.get_logger().info(f"Created point cloud publisher: {topic}")
-        return self._pc_pubs[lane_name]
+        self.get_logger().info(
+            "LaneSegmentationNode3D ready.\n"
+            "  Topics:\n"
+            "    lane/camera_raw        — raw ZED left image\n"
+            "    lane/overlay           — colour overlay + HUD\n"
+            "    lane/points/lanes      — PointCloud2 (x,y,z,crossable,point_type,lane_id)"
+        )
 
     # ─────────────────────────────────────────────────────────────
     def timer_callback(self):
@@ -603,27 +686,25 @@ class LaneSegmentationNode3D(Node):
 
         # ── 1. RETRIEVE ZED DATA ─────────────────────────────────
         self.zed.retrieve_image(self.image_zed_left, sl.VIEW.LEFT)
-        self.zed.retrieve_measure(self.point_cloud, sl.MEASURE.XYZ)
+        self.zed.retrieve_measure(self.point_cloud,  sl.MEASURE.XYZ)
 
-        image_data = self.image_zed_left.get_data()          # BGRA
-        pc_data    = self.point_cloud.get_data()              # (H, W, 4) float32
+        image_data = self.image_zed_left.get_data()   # BGRA uint8
+        pc_data    = self.point_cloud.get_data()       # (H, W, 4) float32
 
-        img_bgr    = cv2.cvtColor(image_data, cv2.COLOR_BGRA2BGR)
-        img_rgb    = cv2.cvtColor(image_data, cv2.COLOR_BGRA2RGB)
+        img_bgr  = cv2.cvtColor(image_data, cv2.COLOR_BGRA2BGR)
+        img_rgb  = cv2.cvtColor(image_data, cv2.COLOR_BGRA2RGB)
         orig_h, orig_w = img_bgr.shape[:2]
 
-        stamp      = self.get_clock().now().to_msg()
-        frame_id   = 'zed_left_camera_frame'
+        stamp    = self.get_clock().now().to_msg()
+        frame_id = 'zed_left_camera_frame'
 
         # ── 2. AI ROAD MASK ──────────────────────────────────────
-        input_resized = cv2.resize(img_rgb, (624, 192))
-        tensor = self.transform(input_resized).unsqueeze(0).to(self.device).half()
-
+        resized = cv2.resize(img_rgb, (624, 192))
+        tensor  = self.transform(resized).unsqueeze(0).to(self.device).half()
         with torch.no_grad():
             output = self.model({"img": tensor})
             if isinstance(output, (list, tuple)):
                 output = output[0]
-
         probs        = F.softmax(output, dim=1)
         mask_float   = F.interpolate(probs, size=(orig_h, orig_w),
                                      mode='bilinear', align_corners=False
@@ -633,90 +714,52 @@ class LaneSegmentationNode3D(Node):
         # ── 3. INTERSECTION CHECK ────────────────────────────────
         at_intersection, branches = check_intersection(road_mask_8u, orig_h, orig_w)
 
-        metadata   = {'mode': '', 'lane_count': 0, 'markings': [], 'branches': []}
-        colored_cam = np.zeros_like(img_bgr)
-        found_dirs  = {}
-        lane_count  = 0
-        marking_infos = []
-        int_center  = None
+        all_lane_points = []   # will be Nx6 float32, one row per 3D point
+        colored_cam     = np.zeros_like(img_bgr)
+        lane_count      = 0
+        marking_infos   = []
+        found_dirs      = {}
+        int_center      = None
 
         # ── 4A. INTERSECTION MODE ────────────────────────────────
         if at_intersection:
-            metadata['mode']    = 'intersection'
-            metadata['branches'] = branches
-
-            direction_masks, (cx, cy) = segment_intersection(
+            colored_cam, direction_masks, int_center = segment_intersection(
                 road_mask_8u, branches, orig_h, orig_w
             )
-            int_center = (cx, cy)
-
-            # Build colored camera overlay from direction masks
-            dir_colors_bgr = {
-                'ego':   (  0, 140, 255),
-                'ahead': ( 60, 210,  60),
-                'left':  (200,  60, 200),
-                'right': (220, 160,  40),
-            }
+            dir_id = {'ego': 0, 'ahead': 1, 'left': 2, 'right': 3}
             for direction, mask in direction_masks.items():
-                colored_cam[mask > 0] = dir_colors_bgr.get(direction, (160, 160, 160))
                 found_dirs[direction] = True
-
-                # 3D points for each branch
-                pts = extract_3d_points_for_mask(pc_data, mask, subsample=3)
-                if len(pts) > 0 and direction in self._int_pc_pubs:
-                    msg = make_pointcloud2_msg(pts, frame_id, stamp, direction)
-                    self._int_pc_pubs[direction].publish(msg)
-
-                    # Log closest navigable point per branch
-                    closest = pts[np.argmin(pts[:, 2])]
-                    self.get_logger().info(
-                        f"[INT] {direction} closest: "
-                        f"X={closest[0]:.2f} Y={closest[1]:.2f} Z={closest[2]:.2f}m",
-                        throttle_duration_sec=1.0
-                    )
+                pts = intersection_mask_to_points(
+                    pc_data, mask, direction,
+                    lane_id=dir_id.get(direction, 9)
+                )
+                if len(pts) > 0:
+                    all_lane_points.append(pts)
 
         # ── 4B. STRAIGHT ROAD MODE ───────────────────────────────
         else:
-            metadata['mode'] = 'road'
-
-            colored_cam, lane_cam_masks, lane_count, marking_infos = segment_straight_road(
+            colored_cam, lane_results, marking_infos = segment_straight_road(
                 img_bgr, road_mask_8u, orig_h, orig_w
             )
-            metadata['lane_count'] = lane_count
-            metadata['markings']   = [
-                {'color': m['color'], 'type': m['type'],
-                 'crossable': m['crossable'], 'fill_ratio': m['fill_ratio']}
-                for m in marking_infos
-            ]
-
-            all_road_pts = []
-
-            for lane_name, cam_mask in lane_cam_masks.items():
-                pts = extract_3d_points_for_mask(pc_data, cam_mask, subsample=3)
-                if len(pts) == 0:
-                    continue
-                all_road_pts.append(pts)
-
-                # Per-lane point cloud
-                pub = self._get_or_create_lane_pc_pub(lane_name)
-                pub.publish(make_pointcloud2_msg(pts, frame_id, stamp, lane_name))
-
-                closest = pts[np.argmin(pts[:, 2])]
-                self.get_logger().info(
-                    f"[ROAD] {lane_name} closest: "
-                    f"X={closest[0]:.2f} Y={closest[1]:.2f} Z={closest[2]:.2f}m",
-                    throttle_duration_sec=1.0
+            lane_count = len(lane_results)
+            for lr in lane_results:
+                pts = lane_mask_to_points(
+                    pc_data,
+                    lr['cam_mask'],
+                    crossable=lr['crossable'],
+                    lane_id=lr['lane_id'],
                 )
+                if len(pts) > 0:
+                    all_lane_points.append(pts)
 
-            # Merged road point cloud
-            if all_road_pts:
-                merged = np.vstack(all_road_pts)
-                self.pub_road_pc.publish(
-                    make_pointcloud2_msg(merged, frame_id, stamp, 'road_all')
-                )
+        # ── 5. PUBLISH RAW IMAGE ─────────────────────────────────
+        ros_raw              = self.bridge.cv2_to_imgmsg(img_bgr, encoding='bgr8')
+        ros_raw.header.stamp = stamp
+        ros_raw.header.frame_id = frame_id
+        self.pub_raw.publish(ros_raw)
 
-        # ── 5. PUBLISH RAW + OVERLAY ─────────────────────────────
-        raw_bgr, overlay = render_overlay(
+        # ── 6. PUBLISH OVERLAY ───────────────────────────────────
+        overlay = render_overlay(
             img_bgr, colored_cam,
             mode='intersection' if at_intersection else 'road',
             lane_count=lane_count,
@@ -724,23 +767,29 @@ class LaneSegmentationNode3D(Node):
             found_dirs=found_dirs,
             int_center=int_center,
         )
-
-        ros_raw     = self.bridge.cv2_to_imgmsg(raw_bgr,  encoding='bgr8')
-        ros_overlay = self.bridge.cv2_to_imgmsg(overlay,  encoding='bgr8')
-
-        for msg in (ros_raw, ros_overlay):
-            msg.header.stamp    = stamp
-            msg.header.frame_id = frame_id
-
-        self.pub_raw.publish(ros_raw)
+        ros_overlay              = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
+        ros_overlay.header.stamp = stamp
+        ros_overlay.header.frame_id = frame_id
         self.pub_overlay.publish(ros_overlay)
 
-        # ── 6. METADATA JSON ─────────────────────────────────────
-        meta_msg      = String()
-        meta_msg.data = json.dumps(metadata)
-        self.pub_meta.publish(meta_msg)
+        # ── 7. PUBLISH LANE POINT CLOUD ──────────────────────────
+        if all_lane_points:
+            merged = np.vstack(all_lane_points).astype(np.float32)
+            pc_msg = build_pointcloud2(merged, frame_id, stamp)
+            self.pub_lanes_pc.publish(pc_msg)
 
-        # ── 7. FPS MONITOR ───────────────────────────────────────
+            # Log summary
+            boundary_pts = merged[merged[:, 4] == 0.0]
+            centre_pts   = merged[merged[:, 4] == 1.0]
+            nocross_pts  = merged[merged[:, 3] == 0.0]
+            self.get_logger().info(
+                f"[{'INT' if at_intersection else 'RD'}] "
+                f"total={len(merged)} boundary={len(boundary_pts)} "
+                f"centre={len(centre_pts)} no-cross={len(nocross_pts)}",
+                throttle_duration_sec=1.0
+            )
+
+        # ── 8. FPS ───────────────────────────────────────────────
         self.frame_counter += 1
         now = time.time()
         if now - self.start_time > 2.0:
@@ -750,7 +799,7 @@ class LaneSegmentationNode3D(Node):
             self.start_time    = now
 
 
-# ═══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 def main(args=None):
     rclpy.init(args=args)
     node = LaneSegmentationNode3D()

@@ -19,7 +19,7 @@ import scipy.ndimage as ndimage
 from scipy.signal import find_peaks
 
 current_dir   = os.path.dirname(os.path.abspath(__file__))
-LFD_REPO_PATH = "/ros2_ws/src/LFD_RoadSeg"
+LFD_REPO_PATH = "/home/mini-dos/ml_laneseg/src/LFD_RoadSeg"
 if os.path.exists(LFD_REPO_PATH):
     sys.path.append(LFD_REPO_PATH)
 

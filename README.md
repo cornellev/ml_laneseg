@@ -17,8 +17,13 @@ docker run -it --rm \
 colcon build --packages-select zed_ml_inference --symlink-install 
 source install/setup.bash
 
-ros2 run zed_ml_inference lane_segmentation_node3dcenter
+ros2 run zed_ml_inference lane_segmentation_node3dlanes
 
-# OR
+FOR TESTING THE MODEL:
+go to src/zed_ml_inference/zed_ml_inference
+change code for the picture that you want to test on
+jsut lfd roadseg byt iself: 
+python3 test_model.py
 
-ros2 run zed_ml_inference lane_segmentation_node3dfastcenter
+for the upgraded version with multilane + intersection capabilities: 
+python3 test_model_multilane.py

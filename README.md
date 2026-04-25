@@ -3,6 +3,14 @@ How to run:
 
 git clone https://github.com/cornellev/ml_laneseg.git
 
+PIXI INSTRUCTIONS:
+(all from the mllaneseg folder itself)
+pixi install
+pixi run build 
+pixi run run-node
+pixi run start-foxglove
+
+DOCKER INSTRUCTIONS:
 docker build -t lane_segr_final -f Dockerfile_cuda.jetson .
 
 docker run -it --rm \

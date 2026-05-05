@@ -1,42 +1,100 @@
 [workspace]
-name = "zed_ros2_ml"
-version = "0.1.0"
-description = "ZED 2 ROS 2 Wrapper with PyTorch integration"
-authors = ["User"]
-channels = ["conda-forge", "robostack-staging"]
-platforms = ["linux-64"]
+name        = "zed_ros2_ml_jetson"
+version     = "0.1.0"
+description = "ZED 2 ROS 2 Wrapper + Lane Segmentation (Jetson Optimized)"
+channels    = ["conda-forge", "robostack-staging"]
+platforms   = ["linux-aarch64"]
+
+[activation.env]
+ROS_DISTRO                     = "humble"
+PYTHONDONTWRITEBYTECODE        = "1"
+FASTRTPS_DEFAULT_PROFILES_FILE = "shm_disable.xml"
+# JetPack CUDA libraries — adjust version number if yours differs
+# Run: find / -name "libcudss.so*" 2>/dev/null   to find the right path
+LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda-12.6/lib64:/usr/lib/aarch64-linux-gnu:/usr/local/zed/lib"
 
 [tasks]
-build = "colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release"
-install-setup = "source install/setup.bash"
-start-camera = "ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2"
 
+# ── One-time setup ───────────────────────────────────────────────
+# Run once after pixi install to wire up ZED Python bindings
+install-zed-python = "python3 /usr/local/zed/get_python_api.py"
+
+# ── Build ────────────────────────────────────────────────────────
+# Builds only the two packages we need — skips C++ ZED wrapper
+# which requires nmea_msgs (not available for python 3.10 in robostack)
+build = """
+bash -c 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-12.6/lib64:/usr/lib/aarch64-linux-gnu:/usr/local/zed/lib:$LD_LIBRARY_PATH && \
+cd /home/mini-dos/ml_laneseg && \
+colcon build \
+  --symlink-install \
+  --packages-select zed_msgs zed_ml_inference \
+  --cmake-args \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--allow-shlib-undefined" \
+    -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined"'
+"""
+
+# ── Run lane node ────────────────────────────────────────────────
+run-node = """
+bash -c 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-12.6/lib64:/usr/lib/aarch64-linux-gnu:/usr/local/zed/lib:$LD_LIBRARY_PATH && \
+cd /home/mini-dos/ml_laneseg && \
+source install/setup.bash && \
+ros2 run zed_ml_inference lane_segmentation_node_final'
+"""
+
+# ── Start ZED camera (separate terminal) ─────────────────────────
+start-camera = """
+bash -c 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-12.6/lib64:/usr/lib/aarch64-linux-gnu:/usr/local/zed/lib:$LD_LIBRARY_PATH && \
+cd /home/mini-dos/ml_laneseg && \
+source install/setup.bash && \
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2'
+"""
+
+# ── Start Foxglove bridge (separate terminal) ─────────────────────
+start-foxglove = """
+bash -c 'cd /home/mini-dos/ml_laneseg && \
+source install/setup.bash && \
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml'
+"""
+
+# ── Run everything at once (Ctrl+C to kill all) ──────────────────
+run-all = """
+bash -c 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-12.6/lib64:/usr/lib/aarch64-linux-gnu:/usr/local/zed/lib:$LD_LIBRARY_PATH && \
+cd /home/mini-dos/ml_laneseg && \
+source install/setup.bash && \
+ros2 run zed_ml_inference lane_segmentation_node_final & \
+sleep 1 && \
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml'
+"""
+
+# ── Dependencies ─────────────────────────────────────────────────
 [dependencies]
-python = "3.11.*"
-numpy = "*"
-# ROS 2 Humble Base
-ros-humble-desktop = "*"
-ros-humble-xacro = "*"
+python                        = "3.10.*"
+ros-humble-desktop            = "*"
+ros-humble-cv-bridge          = "*"
+ros-humble-sensor-msgs        = "*"
+ros-humble-sensor-msgs-py     = "*"
+ros-humble-std-msgs           = "*"
+ros-humble-foxglove-bridge    = "*"
+ros-humble-visualization-msgs = "*"
+ros-humble-xacro              = "*"
 ros-humble-diagnostic-updater = "*"
-ros-humble-nmea-msgs = "*"
-ros-humble-cv-bridge = "*"
-ros-humble-geographic-msgs = "*"
+ros-humble-geographic-msgs    = "*"
 ros-humble-robot-localization = "*"
-ros-humble-backward-ros = "*"
+ros-humble-backward-ros       = "*"
+colcon-common-extensions      = "*"
+cmake                         = "*"
+numpy = ">=1.24,<2.0" 
 
-# Build tools
-cmake = "*"
-pkg-config = "*"
-make = "*"
-ninja = "*"
-colcon-common-extensions = "*"
-
-# For PyTorch pip installation
-pip = "*"
+# ── PyPI (Jetson-optimised CUDA wheels) ──────────────────────────
+[pypi-options]
+extra-index-urls = ["https://pypi.jetson-ai-lab.io/jp6/cu126"]
 
 [pypi-dependencies]
-torch = { version = ">=2.0.0", index = "https://download.pytorch.org/whl/cu121" }
-torchvision = { version = ">=0.15.0", index = "https://download.pytorch.org/whl/cu121" }
-
-[activation]
-scripts = ["setup_env.sh"]
+torch                  = "==2.10.0"
+torchvision            = "==0.25.0"
+opencv-python-headless = "*"
+scipy                  = "*"
+tqdm                   = "*"
+thop                   = "*"
+requests               = "*"
